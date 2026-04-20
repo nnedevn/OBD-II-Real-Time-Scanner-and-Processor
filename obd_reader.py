@@ -226,7 +226,18 @@ class OBDReader:
         return working
 
     async def _poll_loop(self):
-        """Main PID polling coroutine."""
+        """
+        Main PID polling coroutine with automatic reconnection.
+
+        On Pi 3B+, Bluetooth power management can drop the rfcomm link after
+        a few seconds of relative quiet (sniff mode). The loop watches for
+        consecutive null samples and triggers a reconnect if they exceed the
+        threshold. This keeps the scanner running through brief BT hiccups
+        without requiring a manual restart.
+        """
+        consecutive_failures = 0
+        MAX_FAILURES = 3  # Tolerate up to 3 consecutive null polls before reconnecting
+
         while self._running:
             loop_start = asyncio.get_event_loop().time()
 
@@ -234,7 +245,26 @@ class OBDReader:
                 None, self._poll_once
             )
 
-            if sample:
+            if sample is None:
+                consecutive_failures += 1
+                logger.warning(
+                    f"OBD poll returned no data "
+                    f"({consecutive_failures}/{MAX_FAILURES} consecutive failures)"
+                )
+                if consecutive_failures >= MAX_FAILURES:
+                    logger.error(
+                        "Connection appears lost — attempting automatic reconnect…"
+                    )
+                    reconnected = await self._reconnect()
+                    consecutive_failures = 0
+                    if not reconnected:
+                        logger.error(
+                            "All reconnect attempts failed. Stopping stream."
+                        )
+                        self._running = False
+                        break
+            else:
+                consecutive_failures = 0
                 for cb in self._data_subscribers:
                     try:
                         cb(sample)
@@ -245,6 +275,60 @@ class OBDReader:
             elapsed = asyncio.get_event_loop().time() - loop_start
             sleep_time = max(0.0, config.POLL_INTERVAL_SECONDS - elapsed)
             await asyncio.sleep(sleep_time)
+
+    async def _reconnect(self) -> bool:
+        """
+        Attempt to re-establish the OBD connection and restart the Mode 22 loop.
+
+        Uses an incremental back-off: waits OBD_RECONNECT_BASE_WAIT * attempt
+        seconds before each try, capped at 30 seconds. Returns True on success.
+
+        Common causes of drops on Pi 3B+ (most likely first):
+          1. Linux BT sniff mode — fix with: sudo hciconfig hci0 nsniff
+          2. ELM327/STN timeout on slow CPU — fix: OBD_FAST = False, slower polling
+          3. Mode 22 probe blocking at startup — fix: MODE22_POLL_INTERVAL_SECONDS = 0
+          4. Memory pressure causing kernel scheduler delays
+        """
+        # Cancel the Mode 22 loop so it doesn't fight the reconnect
+        if self._mode22_task:
+            self._mode22_task.cancel()
+            try:
+                await self._mode22_task
+            except asyncio.CancelledError:
+                pass
+            self._mode22_task = None
+
+        # Close the dead connection
+        if self._connection:
+            try:
+                self._connection.close()
+            except Exception:
+                pass
+            self._connection = None
+
+        max_attempts = getattr(config, 'OBD_RECONNECT_ATTEMPTS', 5)
+        base_wait = getattr(config, 'OBD_RECONNECT_BASE_WAIT', 3)
+
+        for attempt in range(1, max_attempts + 1):
+            wait = min(base_wait * attempt, 30)
+            logger.info(
+                f"Reconnect attempt {attempt}/{max_attempts} "
+                f"(waiting {wait}s)…"
+            )
+            await asyncio.sleep(wait)
+            try:
+                if self.connect():
+                    logger.info("Reconnected successfully.")
+                    # Restart Mode 22 loop if any commands responded
+                    if self._supported_mode22:
+                        self._mode22_task = asyncio.create_task(
+                            self._mode22_loop()
+                        )
+                    return True
+            except Exception as e:
+                logger.error(f"Reconnect attempt {attempt} failed: {e}")
+
+        return False
 
     def _poll_once(self) -> Optional[OBDSample]:
         """Query all supported PIDs synchronously (runs in thread pool)."""
