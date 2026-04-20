@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>C30 T5 — OBD Scanner</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  /* ── Reset & base ───────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0d0f14;
+    --panel:     #151820;
+    --border:    #252a35;
+    --text:      #e2e8f0;
+    --muted:     #64748b;
+    --green:     #22c55e;
+    --yellow:    #eab308;
+    --red:       #ef4444;
+    --blue:      #3b82f6;
+    --cyan:      #06b6d4;
+    --accent:    #6366f1;
+    --font:      'Inter', system-ui, sans-serif;
+    --radius:    12px;
+    --gap:       10px;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 14px;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: pan-y;
+  }
+
+  /* ── Layout ─────────────────────────────────────────────────────── */
+  #app {
+    display: grid;
+    height: 100vh;
+    grid-template-rows: 42px 1fr 1fr 160px;
+    grid-template-columns: 1fr;
+    gap: var(--gap);
+    padding: var(--gap);
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────── */
+  #header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0 14px;
+  }
+  #header .title { font-size: 13px; font-weight: 600; color: var(--cyan); letter-spacing: .05em; }
+  #header .meta  { display: flex; gap: 16px; align-items: center; }
+  #header .meta span { font-size: 11px; color: var(--muted); }
+  #header .meta .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); display: inline-block;
+    margin-right: 5px; transition: background .4s;
+  }
+  #header .meta .dot.ok  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  #header .meta .dot.err { background: var(--red);   box-shadow: 0 0 6px var(--red); }
+  #dtc-badge {
+    background: var(--red); color: #fff; font-size: 11px; font-weight: 700;
+    border-radius: 20px; padding: 2px 8px; display: none;
+  }
+  #dtc-badge.visible { display: inline-block; }
+
+  /* ── Gauge row ──────────────────────────────────────────────────── */
+  #gauges {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: var(--gap);
+  }
+
+  .gauge-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 4px 4px;
+    cursor: pointer;
+    transition: border-color .2s;
+    position: relative;
+    overflow: hidden;
+  }
+  .gauge-card:active { border-color: var(--accent); }
+  .gauge-card.warn   { border-color: var(--yellow); }
+  .gauge-card.critical { border-color: var(--red); animation: pulse-border .8s infinite; }
+
+  @keyframes pulse-border {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,.4); }
+    50%       { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
+  }
+
+  .gauge-svg { width: 100%; max-width: 120px; }
+  .gauge-label { font-size: 10px; color: var(--muted); text-transform: uppercase;
+                 letter-spacing: .08em; margin-top: 2px; }
+  .gauge-value { font-size: 20px; font-weight: 700; line-height: 1;
+                 position: absolute; top: 50%; left: 50%;
+                 transform: translate(-50%, -50%); pointer-events: none; }
+  .gauge-unit  { font-size: 9px; color: var(--muted); }
+
+  /* ── Graphs row ─────────────────────────────────────────────────── */
+  #graphs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: var(--gap);
+  }
+
+  .chart-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 10px 6px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .chart-title {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--muted); margin-bottom: 4px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .chart-current { font-size: 14px; font-weight: 700; color: var(--text); }
+  .chart-canvas  { flex: 1; min-height: 0; }
+
+  /* ── LLM panel ──────────────────────────────────────────────────── */
+  #llm-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    overflow: hidden;
+  }
+
+  #llm-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px; font-weight: 600; color: var(--accent);
+  }
+  #llm-status { font-size: 10px; color: var(--muted); }
+  #llm-status.thinking { color: var(--yellow); }
+
+  #llm-output {
+    padding: 8px 12px;
+    font-size: 12px; line-height: 1.6;
+    overflow-y: auto;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #llm-output .event-tag {
+    display: inline-block; font-size: 10px; font-weight: 700;
+    border-radius: 4px; padding: 1px 6px; margin-right: 6px;
+  }
+  .tag-anomaly  { background: rgba(239,68,68,.2);  color: var(--red); }
+  .tag-dtc      { background: rgba(239,68,68,.2);  color: var(--red); }
+  .tag-summary  { background: rgba(99,102,241,.2); color: var(--accent); }
+  .tag-question { background: rgba(6,182,212,.2);  color: var(--cyan); }
+  .tag-brake    { background: rgba(234,179,8,.2);  color: var(--yellow); }
+
+  #llm-input-row {
+    display: flex;
+    border-top: 1px solid var(--border);
+    padding: 6px 8px;
+    gap: 6px;
+  }
+  #llm-input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 10px; color: var(--text);
+    font-family: var(--font); font-size: 12px; outline: none;
+  }
+  #llm-input:focus { border-color: var(--accent); }
+  #llm-send {
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 8px; padding: 6px 14px; cursor: pointer;
+    font-size: 12px; font-weight: 600; touch-action: manipulation;
+  }
+  #llm-send:active { opacity: .7; }
+
+  /* ── DTC overlay ────────────────────────────────────────────────── */
+  #dtc-overlay {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,.7); align-items: center; justify-content: center;
+  }
+  #dtc-overlay.visible { display: flex; }
+  #dtc-box {
+    background: var(--panel); border: 1px solid var(--red);
+    border-radius: var(--radius); padding: 20px; max-width: 480px; width: 90%;
+    max-height: 80vh; overflow-y: auto;
+  }
+  #dtc-box h2 { color: var(--red); font-size: 15px; margin-bottom: 10px; }
+  #dtc-list   { list-style: none; }
+  #dtc-list li {
+    padding: 6px 0; border-bottom: 1px solid var(--border);
+    font-size: 13px; font-family: monospace;
+  }
+  #dtc-close  {
+    margin-top: 14px; width: 100%; background: var(--border); color: var(--text);
+    border: none; border-radius: 8px; padding: 10px; cursor: pointer;
+    font-size: 13px; font-weight: 600;
+  }
+
+  /* ── Scrollbar styling ──────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  /* ── Brake efficiency card ──────────────────────────────────────── */
+  .brake-card {
+    align-items: flex-start;
+    padding: 10px 12px 8px;
+    cursor: pointer;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 150px;
+  }
+  .brake-card .bc-title {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--muted); margin-bottom: 3px;
+    width: 100%;
+  }
+  .brake-card .bc-row {
+    display: flex; justify-content: space-between; width: 100%;
+    font-size: 11px; color: var(--text); line-height: 1.5;
+  }
+  .brake-card .bc-lbl { color: var(--muted); }
+  .bc-val { font-weight: 700; color: var(--cyan); }
+  .bc-ok   { color: var(--green) !important; }
+  .bc-warn { color: var(--yellow) !important; }
+  .bc-down { color: var(--red) !important; }
+  .tag-brake { background: rgba(234,179,8,.2); color: var(--yellow); }
+</style>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Header ── -->
+  <div id="header">
+    <div class="title">🚗 &nbsp;Volvo C30 T5 &nbsp;·&nbsp; OBD II Scanner</div>
+    <div class="meta">
+      <span><span class="dot" id="obd-dot"></span><span id="obd-status">Connecting…</span></span>
+      <span><span class="dot" id="llm-dot"></span><span id="llm-conn-status">LLM…</span></span>
+      <span id="dtc-badge">DTCs</span>
+      <span id="clock" style="font-size:12px;font-weight:600;"></span>
+    </div>
+  </div>
+
+  <!-- ── Gauge row ── -->
+  <div id="gauges">
+    <!-- Gauges injected by JS -->
+    <!-- Brake efficiency card (static — updated via brake_stats WS messages) -->
+    <div id="brake-card" class="gauge-card brake-card" title="Tap to request brake health analysis">
+      <div class="bc-title">🛑 Brake Efficiency</div>
+      <div class="bc-row"><span class="bc-lbl">Events</span><span class="bc-val" id="bc-events">–</span></div>
+      <div class="bc-row"><span class="bc-lbl">Recent avg</span><span class="bc-val" id="bc-avg">–</span></div>
+      <div class="bc-row"><span class="bc-lbl">Trend</span><span class="bc-val" id="bc-trend">–</span></div>
+      <div class="bc-row"><span class="bc-lbl">Switch</span><span class="bc-val" id="bc-switch">–</span></div>
+    </div>
+  </div>
+
+  <!-- ── Graph row ── -->
+  <div id="graphs">
+    <!-- Charts injected by JS -->
+  </div>
+
+  <!-- ── LLM panel ── -->
+  <div id="llm-panel">
+    <div id="llm-header">
+      <span>⚡ Granite AI Analysis</span>
+      <span id="llm-status">Ready</span>
+    </div>
+    <div id="llm-output"></div>
+    <div id="llm-input-row">
+      <input id="llm-input" type="text" placeholder="Ask anything… e.g. 'Is boost normal?' or 'Do my brakes need bleeding?'" />
+      <button id="llm-send">Ask</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── DTC overlay ── -->
+<div id="dtc-overlay">
+  <div id="dtc-box">
+    <h2>🚨 Active Fault Codes</h2>
+    <ul id="dtc-list"></ul>
+    <button id="dtc-close">Dismiss</button>
+  </div>
+</div>
+
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// GAUGE & CHART CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════
+
+const GAUGE_DEFS = [
+  { key: 'RPM',          label: 'RPM',     unit: '',    min: 0,   max: 7000, warn: 6000, crit: 6600, decimals: 0, color: '#6366f1' },
+  { key: 'BOOST_PSI',    label: 'Boost',   unit: 'psi', min: -5,  max: 16,   warn: 9.5,  crit: 12,   decimals: 1, color: '#06b6d4' },
+  { key: 'COOLANT_TEMP', label: 'Coolant', unit: '°C',  min: 40,  max: 130,  warn: 107,  crit: 116,  decimals: 0, color: '#f97316' },
+  { key: 'SPEED',        label: 'Speed',   unit: 'km/h',min: 0,   max: 260,  warn: null, crit: null, decimals: 0, color: '#22c55e' },
+  { key: 'OIL_TEMP',     label: 'Oil',     unit: '°C',  min: 20,  max: 160,  warn: 130,  crit: 145,  decimals: 0, color: '#eab308' },
+  { key: 'VOLVO_OIL_TEMP', label: 'Oil★',  unit: '°C',  min: 20,  max: 160,  warn: 130,  crit: 145,  decimals: 0, color: '#eab308', fallback: 'OIL_TEMP' },
+  { key: 'AFR',          label: 'AFR',     unit: ':1',  min: 10,  max: 18,   warn: null, crit: null, decimals: 2, color: '#a78bfa' },
+  { key: 'THROTTLE_POS', label: 'Throttle',unit: '%',   min: 0,   max: 100,  warn: null, crit: null, decimals: 0, color: '#34d399' },
+];
+
+// Deduplicate: if OIL_TEMP and VOLVO_OIL_TEMP are both present, hide OIL_TEMP
+const GAUGE_PRIORITY = { 'VOLVO_OIL_TEMP': 'OIL_TEMP' };  // winner: loser
+
+const CHART_DEFS = [
+  { key: 'RPM',          label: 'RPM',       unit: '',    color: '#6366f1', min: 0,  max: 7000 },
+  { key: 'BOOST_PSI',    label: 'Boost PSI', unit: 'psi', color: '#06b6d4', min: -5, max: 16   },
+  { key: 'COOLANT_TEMP', label: 'Coolant',   unit: '°C',  color: '#f97316', min: 40, max: 130  },
+  { key: 'AFR',          label: 'AFR',       unit: ':1',  color: '#a78bfa', min: 10, max: 18   },
+  { key: 'THROTTLE_POS', label: 'Throttle',  unit: '%',   color: '#34d399', min: 0,  max: 100  },
+];
+
+const HISTORY_POINTS = 60;  // seconds of history on graphs
+
+// ═══════════════════════════════════════════════════════════════════
+// SVG GAUGE RENDERER
+// ═══════════════════════════════════════════════════════════════════
+
+function describeArc(cx, cy, r, startAngle, endAngle) {
+  const toRad = a => (a - 90) * Math.PI / 180;
+  const x1 = cx + r * Math.cos(toRad(startAngle));
+  const y1 = cy + r * Math.sin(toRad(startAngle));
+  const x2 = cx + r * Math.cos(toRad(endAngle));
+  const y2 = cy + r * Math.sin(toRad(endAngle));
+  const large = (endAngle - startAngle) > 180 ? 1 : 0;
+  return `M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2}`;
+}
+
+function buildGaugeSVG(def) {
+  const CX = 60, CY = 60, R = 48;
+  const START = -135, END = 135, SWEEP = END - START;
+  const TRACK_COLOR = '#1e2535';
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 120 100');
+  svg.classList.add('gauge-svg');
+  svg.setAttribute('id', `gauge-svg-${def.key}`);
+
+  // Track arc
+  const track = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  track.setAttribute('d', describeArc(CX, CY, R, START, END));
+  track.setAttribute('fill', 'none');
+  track.setAttribute('stroke', TRACK_COLOR);
+  track.setAttribute('stroke-width', '8');
+  track.setAttribute('stroke-linecap', 'round');
+  svg.appendChild(track);
+
+  // Warn zone arc
+  if (def.warn !== null) {
+    const warnFrac = (def.warn - def.min) / (def.max - def.min);
+    const warnAngle = START + SWEEP * warnFrac;
+    const warnArc = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    warnArc.setAttribute('d', describeArc(CX, CY, R, warnAngle, END));
+    warnArc.setAttribute('fill', 'none');
+    warnArc.setAttribute('stroke', 'rgba(234,179,8,0.25)');
+    warnArc.setAttribute('stroke-width', '8');
+    warnArc.setAttribute('stroke-linecap', 'round');
+    svg.appendChild(warnArc);
+  }
+
+  // Critical zone arc
+  if (def.crit !== null) {
+    const critFrac = (def.crit - def.min) / (def.max - def.min);
+    const critAngle = START + SWEEP * critFrac;
+    const critArc = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    critArc.setAttribute('d', describeArc(CX, CY, R, critAngle, END));
+    critArc.setAttribute('fill', 'none');
+    critArc.setAttribute('stroke', 'rgba(239,68,68,0.3)');
+    critArc.setAttribute('stroke-width', '8');
+    critArc.setAttribute('stroke-linecap', 'round');
+    svg.appendChild(critArc);
+  }
+
+  // Value arc
+  const valueArc = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  valueArc.setAttribute('fill', 'none');
+  valueArc.setAttribute('stroke', def.color);
+  valueArc.setAttribute('stroke-width', '8');
+  valueArc.setAttribute('stroke-linecap', 'round');
+  valueArc.setAttribute('id', `gauge-arc-${def.key}`);
+  valueArc.style.transition = 'all 0.3s ease';
+  svg.appendChild(valueArc);
+
+  // Value text
+  const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  text.setAttribute('x', CX);
+  text.setAttribute('y', CY + 5);
+  text.setAttribute('text-anchor', 'middle');
+  text.setAttribute('dominant-baseline', 'middle');
+  text.setAttribute('fill', '#e2e8f0');
+  text.setAttribute('font-size', '16');
+  text.setAttribute('font-weight', '700');
+  text.setAttribute('font-family', 'system-ui, sans-serif');
+  text.setAttribute('id', `gauge-text-${def.key}`);
+  text.textContent = '--';
+  svg.appendChild(text);
+
+  // Unit text
+  const unitText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  unitText.setAttribute('x', CX);
+  unitText.setAttribute('y', CY + 22);
+  unitText.setAttribute('text-anchor', 'middle');
+  unitText.setAttribute('fill', '#64748b');
+  unitText.setAttribute('font-size', '9');
+  unitText.setAttribute('font-family', 'system-ui, sans-serif');
+  unitText.textContent = def.unit;
+  svg.appendChild(unitText);
+
+  return svg;
+}
+
+function updateGauge(def, value) {
+  const arc = document.getElementById(`gauge-arc-${def.key}`);
+  const txt = document.getElementById(`gauge-text-${def.key}`);
+  const card = document.getElementById(`gauge-card-${def.key}`);
+  if (!arc || !txt || !card) return;
+
+  const CX = 60, CY = 60, R = 48;
+  const START = -135, SWEEP = 270;
+
+  if (value === null || value === undefined) {
+    arc.setAttribute('d', '');
+    txt.textContent = '--';
+    arc.setAttribute('stroke', '#6366f1');
+    card.className = 'gauge-card';
+    return;
+  }
+
+  const frac = Math.max(0, Math.min(1, (value - def.min) / (def.max - def.min)));
+  const endAngle = START + SWEEP * frac;
+
+  if (frac > 0) {
+    arc.setAttribute('d', describeArc(CX, CY, R, START, endAngle));
+  } else {
+    arc.setAttribute('d', '');
+  }
+
+  txt.textContent = value.toFixed(def.decimals);
+
+  // Color & card state based on thresholds
+  let color = def.color;
+  let state = '';
+  if (def.crit !== null && value >= def.crit) {
+    color = '#ef4444'; state = 'critical';
+  } else if (def.warn !== null && value >= def.warn) {
+    color = '#eab308'; state = 'warn';
+  }
+  arc.setAttribute('stroke', color);
+  txt.setAttribute('fill', state === 'critical' ? '#ef4444' : state === 'warn' ? '#eab308' : '#e2e8f0');
+  card.className = 'gauge-card' + (state ? ` ${state}` : '');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// BUILD DOM
+// ═══════════════════════════════════════════════════════════════════
+
+let activeGaugeDefs = [];
+let activeChartDefs = [];
+const chartInstances = {};
+const chartData = {};
+
+function initGauges(availableKeys) {
+  const container = document.getElementById('gauges');
+  container.innerHTML = '';
+  activeGaugeDefs = [];
+
+  // Determine which gauges to show (handle OIL_TEMP / VOLVO_OIL_TEMP priority)
+  const skip = new Set();
+  for (const [winner, loser] of Object.entries(GAUGE_PRIORITY)) {
+    if (availableKeys.has(winner)) skip.add(loser);
+  }
+
+  for (const def of GAUGE_DEFS) {
+    if (skip.has(def.key)) continue;
+    if (!availableKeys.has(def.key) && !def.fallback) continue;
+    if (!availableKeys.has(def.key) && def.fallback && !availableKeys.has(def.fallback)) continue;
+
+    const resolvedDef = { ...def };
+    if (!availableKeys.has(def.key) && def.fallback) resolvedDef.key = def.fallback;
+
+    activeGaugeDefs.push(resolvedDef);
+
+    const card = document.createElement('div');
+    card.className = 'gauge-card';
+    card.id = `gauge-card-${resolvedDef.key}`;
+
+    const svg = buildGaugeSVG(resolvedDef);
+    const label = document.createElement('div');
+    label.className = 'gauge-label';
+    label.textContent = resolvedDef.label;
+
+    card.appendChild(svg);
+    card.appendChild(label);
+    card.addEventListener('click', () => highlightChart(resolvedDef.key));
+    container.appendChild(card);
+  }
+}
+
+function initCharts(availableKeys) {
+  const container = document.getElementById('graphs');
+  container.innerHTML = '';
+  activeChartDefs = [];
+
+  for (const def of CHART_DEFS) {
+    if (!availableKeys.has(def.key)) continue;
+    activeChartDefs.push(def);
+    chartData[def.key] = { labels: [], values: [] };
+
+    const card = document.createElement('div');
+    card.className = 'chart-card';
+    card.id = `chart-card-${def.key}`;
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'chart-title';
+    const titleSpan = document.createElement('span');
+    titleSpan.textContent = def.label;
+    const valSpan = document.createElement('span');
+    valSpan.className = 'chart-current';
+    valSpan.id = `chart-val-${def.key}`;
+    valSpan.textContent = '--';
+    titleRow.appendChild(titleSpan);
+    titleRow.appendChild(valSpan);
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'chart-canvas';
+    canvas.id = `chart-${def.key}`;
+
+    card.appendChild(titleRow);
+    card.appendChild(canvas);
+    container.appendChild(card);
+
+    const ctx = canvas.getContext('2d');
+    chartInstances[def.key] = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          data: [],
+          borderColor: def.color,
+          backgroundColor: def.color + '18',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: true,
+          tension: 0.3,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: { display: false },
+          y: {
+            min: def.min, max: def.max,
+            grid: { color: '#1e2535' },
+            ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 4 },
+            border: { color: '#252a35' },
+          }
+        }
+      }
+    });
+  }
+}
+
+function pushChartPoint(key, value, timeLabel) {
+  const d = chartData[key];
+  if (!d) return;
+  d.labels.push(timeLabel);
+  d.values.push(value);
+  if (d.labels.length > HISTORY_POINTS) {
+    d.labels.shift();
+    d.values.shift();
+  }
+  const chart = chartInstances[key];
+  if (chart) {
+    chart.data.labels = d.labels;
+    chart.data.datasets[0].data = d.values;
+    chart.update('none');
+  }
+  const valEl = document.getElementById(`chart-val-${key}`);
+  if (valEl) {
+    const def = CHART_DEFS.find(d => d.key === key);
+    valEl.textContent = value !== null
+      ? value.toFixed(def?.key === 'AFR' ? 2 : 1) + ' ' + (def?.unit || '')
+      : '--';
+  }
+}
+
+function highlightChart(key) {
+  // Briefly highlight the chart card
+  const card = document.getElementById(`chart-card-${key}`);
+  if (!card) return;
+  card.style.borderColor = '#6366f1';
+  setTimeout(() => card.style.borderColor = '', 600);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// WEBSOCKET — DATA
+// ═══════════════════════════════════════════════════════════════════
+
+let dataWs = null;
+let llmWs = null;
+let initialized = false;
+let lastValues = {};
+let activeDTCs = [];
+
+function connectDataWS() {
+  const url = `ws://${location.host}/ws/data`;
+  dataWs = new WebSocket(url);
+
+  dataWs.onopen = () => {
+    document.getElementById('obd-dot').className = 'dot ok';
+    document.getElementById('obd-status').textContent = 'Connected';
+  };
+
+  dataWs.onmessage = e => {
+    const msg = JSON.parse(e.data);
+
+    if (msg.type === 'sample') {
+      const values = msg.values || {};
+      lastValues = values;
+
+      // First sample — initialize gauges and charts based on available keys
+      if (!initialized) {
+        const keys = new Set(Object.keys(values).filter(k => values[k] !== null));
+        initGauges(keys);
+        initCharts(keys);
+        initialized = true;
+      }
+
+      const ts = new Date(msg.ts * 1000);
+      const timeLabel = ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+      // Update gauges
+      for (const def of activeGaugeDefs) {
+        updateGauge(def, values[def.key] ?? null);
+      }
+
+      // Update charts
+      for (const def of activeChartDefs) {
+        const v = values[def.key];
+        if (v !== undefined && v !== null) {
+          pushChartPoint(def.key, parseFloat(v), timeLabel);
+        }
+      }
+
+      // Update DTCs
+      if (msg.dtcs && msg.dtcs.length !== activeDTCs.length) {
+        activeDTCs = msg.dtcs;
+        updateDTCBadge();
+      }
+    }
+
+    if (msg.type === 'dtc_update') {
+      if (msg.new.length > 0) {
+        activeDTCs = [...new Set([...activeDTCs, ...msg.new])];
+        updateDTCBadge();
+        showDTCOverlay();
+      }
+      if (msg.cleared.length > 0) {
+        activeDTCs = activeDTCs.filter(c => !msg.cleared.includes(c));
+        updateDTCBadge();
+      }
+    }
+
+    if (msg.type === 'brake_stats') {
+      updateBrakeCard(msg);
+    }
+  };
+
+  dataWs.onclose = () => {
+    document.getElementById('obd-dot').className = 'dot err';
+    document.getElementById('obd-status').textContent = 'Reconnecting…';
+    setTimeout(connectDataWS, 3000);
+  };
+
+  dataWs.onerror = () => dataWs.close();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// WEBSOCKET — LLM
+// ═══════════════════════════════════════════════════════════════════
+
+function connectLLMWS() {
+  const url = `ws://${location.host}/ws/llm`;
+  llmWs = new WebSocket(url);
+
+  llmWs.onopen = () => {
+    document.getElementById('llm-dot').className = 'dot ok';
+    document.getElementById('llm-conn-status').textContent = 'Granite';
+  };
+
+  let currentOutput = null;
+
+  llmWs.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    const out = document.getElementById('llm-output');
+    const status = document.getElementById('llm-status');
+
+    if (msg.type === 'event') {
+      // New analysis event — create a block
+      const block = document.createElement('div');
+      block.style.marginBottom = '8px';
+
+      const tagSpan = document.createElement('span');
+      tagSpan.className = `event-tag tag-${msg.event_type}`;
+      tagSpan.textContent = msg.event_type.toUpperCase();
+
+      const titleSpan = document.createElement('span');
+      titleSpan.style.fontWeight = '600';
+      titleSpan.textContent = msg.title;
+
+      block.appendChild(tagSpan);
+      block.appendChild(titleSpan);
+      block.appendChild(document.createElement('br'));
+
+      const bodySpan = document.createElement('span');
+      bodySpan.id = 'llm-stream-target';
+      block.appendChild(bodySpan);
+
+      out.appendChild(block);
+      currentOutput = bodySpan;
+      status.textContent = 'Thinking…';
+      status.className = 'thinking';
+      out.scrollTop = out.scrollHeight;
+    }
+
+    if (msg.type === 'token') {
+      if (!currentOutput) {
+        currentOutput = document.createElement('span');
+        currentOutput.id = 'llm-stream-target';
+        out.appendChild(currentOutput);
+      }
+      currentOutput.textContent += msg.text;
+      out.scrollTop = out.scrollHeight;
+    }
+
+    if (msg.type === 'done') {
+      currentOutput = null;
+      status.textContent = 'Ready';
+      status.className = '';
+      // Keep last 3 blocks
+      while (out.children.length > 3) out.removeChild(out.firstChild);
+    }
+  };
+
+  llmWs.onclose = () => {
+    document.getElementById('llm-dot').className = 'dot err';
+    document.getElementById('llm-conn-status').textContent = 'Reconnecting…';
+    setTimeout(connectLLMWS, 3000);
+  };
+
+  llmWs.onerror = () => llmWs.close();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// LLM INPUT
+// ═══════════════════════════════════════════════════════════════════
+
+function sendQuestion() {
+  const input = document.getElementById('llm-input');
+  const q = input.value.trim();
+  if (!q || !llmWs || llmWs.readyState !== WebSocket.OPEN) return;
+  llmWs.send(JSON.stringify({ type: 'question', text: q }));
+  input.value = '';
+}
+
+document.getElementById('llm-send').addEventListener('click', sendQuestion);
+document.getElementById('llm-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') sendQuestion();
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// DTC OVERLAY
+// ═══════════════════════════════════════════════════════════════════
+
+function updateDTCBadge() {
+  const badge = document.getElementById('dtc-badge');
+  if (activeDTCs.length > 0) {
+    badge.textContent = `${activeDTCs.length} DTC${activeDTCs.length > 1 ? 's' : ''}`;
+    badge.classList.add('visible');
+  } else {
+    badge.classList.remove('visible');
+  }
+}
+
+function showDTCOverlay() {
+  const list = document.getElementById('dtc-list');
+  list.innerHTML = '';
+  for (const code of activeDTCs) {
+    const li = document.createElement('li');
+    li.textContent = code;
+    list.appendChild(li);
+  }
+  document.getElementById('dtc-overlay').classList.add('visible');
+}
+
+document.getElementById('dtc-badge').addEventListener('click', showDTCOverlay);
+document.getElementById('dtc-close').addEventListener('click', () => {
+  document.getElementById('dtc-overlay').classList.remove('visible');
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// BRAKE EFFICIENCY CARD
+// ═══════════════════════════════════════════════════════════════════
+
+function updateBrakeCard(stats) {
+  const el = id => document.getElementById(id);
+  if (!el('bc-events')) return;
+
+  // Event count
+  el('bc-events').textContent = (stats.total_events != null) ? stats.total_events : '–';
+
+  // Recent average deceleration
+  const avgG = stats.recent_avg_g;
+  el('bc-avg').textContent = (avgG != null) ? avgG.toFixed(2) + ' g' : '–';
+
+  // Trend indicator
+  const trendEl = el('bc-trend');
+  if (stats.declining && stats.decline_pct > 0) {
+    trendEl.textContent = `↘ −${(stats.decline_pct * 100).toFixed(0)}%`;
+    trendEl.className = 'bc-val bc-down';
+    // Flash the card border to draw attention
+    const card = document.getElementById('brake-card');
+    if (card) { card.classList.add('warn'); }
+  } else if (stats.declining === false && stats.total_events > 0) {
+    trendEl.textContent = '↗ Stable';
+    trendEl.className = 'bc-val bc-ok';
+    const card = document.getElementById('brake-card');
+    if (card) { card.classList.remove('warn'); card.classList.remove('critical'); }
+  } else {
+    trendEl.textContent = '– Collecting';
+    trendEl.className = 'bc-val';
+  }
+
+  // Switch mode
+  const switchEl = el('bc-switch');
+  if (stats.switch_confirmed != null) {
+    if (stats.switch_confirmed) {
+      switchEl.textContent = '✅ Switch';
+      switchEl.className = 'bc-val bc-ok';
+    } else {
+      switchEl.textContent = '⚠ Inferred';
+      switchEl.className = 'bc-val bc-warn';
+    }
+  }
+}
+
+// Tapping the brake card triggers an on-demand brake health analysis
+document.getElementById('brake-card').addEventListener('click', () => {
+  if (llmWs && llmWs.readyState === WebSocket.OPEN) {
+    llmWs.send(JSON.stringify({ type: 'question', text: 'brake health analysis' }));
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// CLOCK
+// ═══════════════════════════════════════════════════════════════════
+
+function updateClock() {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ═══════════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════════
+
+// Placeholder gauges until first WS sample arrives
+initGauges(new Set(['RPM', 'BOOST_PSI', 'COOLANT_TEMP', 'SPEED', 'AFR', 'THROTTLE_POS']));
+initCharts(new Set(['RPM', 'BOOST_PSI', 'COOLANT_TEMP', 'AFR', 'THROTTLE_POS']));
+
+connectDataWS();
+connectLLMWS();
+</script>
+</body>
+</html>

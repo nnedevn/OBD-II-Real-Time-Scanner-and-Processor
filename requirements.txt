@@ -1,0 +1,29 @@
+# OBD II + IBM Granite LLM Scanner — Python Dependencies
+#
+# Install with:
+#   pip install -r requirements.txt --break-system-packages
+#
+# Then pull the Granite model:
+#   ollama pull granite3-dense:8b
+#
+# Lighter model for low-RAM systems (<16GB):
+#   ollama pull granite3-dense:2b
+
+# OBD-II communication
+obd>=0.7.1
+
+# HTTP client for Ollama API
+requests>=2.31.0
+
+# Terminal dashboard
+rich>=13.7.0
+
+# Browser dashboard web server
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+# Async support (included in Python 3.10+ stdlib, listed for clarity)
+# asyncio — stdlib
+
+# Optional: type hints backport for Python < 3.10
+# typing-extensions>=4.0.0
