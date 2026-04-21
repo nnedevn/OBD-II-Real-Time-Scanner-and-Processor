@@ -9,17 +9,17 @@ To switch hardware, change PROFILE below and restart the scanner.
 Available profiles
 ------------------
   "pi3b"  →  config_pi3b.py  — Raspberry Pi 3B+ (1 GB RAM, granite4:350m)
-  "fast"  →  config_fast.py  — i7 / 16 GB RAM desktop or laptop (granite3-dense:8b)
+  "fast"  →  config_fast.py  — i7 / 16 GB RAM desktop or laptop (granite4:3b)
 
 Quick-start checklist (both profiles)
 --------------------------------------
   1. Set OBD_PORT in the chosen profile file (or leave None for auto-detect):
-       Linux:  "/dev/rfcomm0"          (after: sudo rfcomm bind /dev/rfcomm0 <MAC>)
-       macOS:  "/dev/cu.OBDLinkMXp-…" (appears after pairing in Bluetooth settings)
+       Linux (Pi OS / Ubuntu):  "/dev/rfcomm0"
+       (after: sudo rfcomm bind /dev/rfcomm0 <MAC>)
 
   2. Pull the model for your profile:
        Pi 3B+:   ollama pull granite4:350m
-       Fast PC:  ollama pull granite3-dense:8b
+       Fast PC:  ollama pull granite4:3b
 
   3. Pi 3B+ only — disable BT power management before first run:
        sudo hciconfig hci0 nsniff

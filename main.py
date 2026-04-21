@@ -22,7 +22,7 @@ Browser dashboard:
 
 Requirements:
   pip install obd requests rich fastapi uvicorn
-  ollama pull granite3-dense:8b
+  ollama pull granite4:3b
 
 Bluetooth setup (Linux):
   sudo rfkill unblock bluetooth

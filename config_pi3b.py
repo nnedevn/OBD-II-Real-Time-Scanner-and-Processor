@@ -29,8 +29,8 @@ from vehicle_profile import STANDARD_PIDS, THRESHOLDS_C30_T5, VOLVO_MODE22_COMMA
 HARDWARE_PROFILE = "Pi 3B+"
 
 # ── OBD Connection ────────────────────────────────────────────────────────────
-# Linux: set to "/dev/rfcomm0" after: sudo rfcomm bind /dev/rfcomm0 <MAC>
-# macOS: set to the path shown by:  ls /dev/cu.* | grep -i obd
+# Linux (Pi OS / Ubuntu): set to "/dev/rfcomm0"
+# after: sudo rfcomm bind /dev/rfcomm0 <MAC>
 OBD_PORT             = None   # Auto-detect. Override if auto-detect is unreliable.
 OBD_BAUDRATE         = 38400
 OBD_TIMEOUT          = 30     # Seconds for initial ECU handshake
@@ -57,10 +57,9 @@ BUFFER_SIZE          = 30   # 30 samples ≈ 1 min at 2 Hz polling
 LLM_CONTEXT_SAMPLES  = 8    # Samples sent to LLM per analysis call (~16 s window)
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
-# granite4:350m is the right call for 1 GB RAM. It leaves enough headroom to
-# avoid OOM kills and still delivers useful diagnostic answers.
-# If you want slightly better quality and can accept the risk:
-#   granite3.1-moe:1b  (~600 MB) — very tight; watch 'free -h' while running.
+# granite4:350m is the only viable Granite 4 choice for 1 GB RAM.
+# granite4:1b (3.3 GB) and granite4:3b (2.1 GB) are both too large.
+# granite4:350m delivers useful diagnostic answers and fits comfortably.
 OLLAMA_BASE_URL              = "http://localhost:11434"
 LLM_MODEL                    = "granite4:350m"
 LLM_TEMPERATURE              = 0.2
