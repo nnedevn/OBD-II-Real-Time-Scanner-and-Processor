@@ -37,13 +37,14 @@ Bluetooth setup (Linux):
 import argparse
 import asyncio
 import csv
+import json
 import logging
 import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from rich.console import Console
 from rich.layout import Layout
@@ -59,6 +60,8 @@ from anomaly_detector import AnomalyDetector, AnomalyEvent
 from llm_interface import LLMInterface
 from dashboard_server import DashboardServer
 from brake_monitor import BrakeMonitor, BrakeEvent, BrakeTrend
+from database import Database
+from vehicle_profile import VEHICLE_INFO
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -114,6 +117,73 @@ class CSVLogger:
     def close(self):
         if self._file:
             self._file.close()
+
+
+# ── LLM Analysis Logger ───────────────────────────────────────────────────────
+
+class LLMLogger:
+    """
+    Appends every completed Granite analysis to a per-session JSONL file
+    so the full history of LLM output is available offline for later
+    review, fine-tuning data extraction, or cross-session trend analysis.
+
+    One record per line. Schema:
+      {
+        "timestamp":   <float unix>,
+        "datetime":    "<ISO-8601>",
+        "type":        "anomaly" | "dtc" | "brake" | "summary",
+        "model":       "<config.LLM_MODEL>",
+        "trigger":     { ...type-specific metadata... },
+        "context":     "<telemetry/trend snapshot sent to LLM>",
+        "output":      "<full Granite response text, possibly empty>",
+        "output_empty": <bool>    # true when the LLM returned nothing
+      }
+
+    JSONL is used over CSV so multi-line LLM output doesn't need escaping,
+    and the file stays parseable even if a run crashes mid-write.
+    """
+
+    def __init__(self):
+        self._file = None
+        self._path: Optional[Path] = None
+
+    def open(self):
+        log_dir = Path(config.LOG_DIR)
+        log_dir.mkdir(exist_ok=True)
+        self._path = log_dir / f"llm_analyses_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        self._file = open(self._path, "a", encoding="utf-8")
+        logger.info(f"Logging LLM analyses to {self._path}")
+
+    def log(
+        self,
+        analysis_type: str,
+        trigger: dict[str, Any],
+        context: str,
+        output: Optional[str],
+    ):
+        if self._file is None:
+            return
+        now = time.time()
+        record = {
+            "timestamp": now,
+            "datetime": datetime.fromtimestamp(now).isoformat(),
+            "type": analysis_type,
+            "model": config.LLM_MODEL,
+            "trigger": trigger,
+            "context": context,
+            "output": output or "",
+            "output_empty": not bool(output),
+        }
+        try:
+            self._file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._file.flush()
+        except Exception as e:
+            logger.error(f"LLMLogger failed to write {analysis_type} record: {e}")
+
+    def close(self):
+        if self._file:
+            self._file.close()
+            self._file = None
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -198,6 +268,8 @@ class OBDScanner:
         self.detector = AnomalyDetector()
         self.llm = LLMInterface()
         self.csv_logger = CSVLogger()
+        self.llm_logger = LLMLogger()
+        self.db = Database()
         self.show_terminal = show_terminal
         self.show_web = show_web
         self.web_port = web_port
@@ -245,10 +317,12 @@ class OBDScanner:
     def _on_dtc(self, new_dtcs: list[str], cleared_dtcs: list[str]):
         """Called when DTC list changes."""
         for code in new_dtcs:
+            self.db.log_dtc(code, state="new")
             asyncio.get_event_loop().call_soon_threadsafe(
                 self._schedule_dtc_analysis, code
             )
         for code in cleared_dtcs:
+            self.db.log_dtc(code, state="cleared")
             console.print(f"[green]✅ DTC cleared: {code}[/green]")
         # Push DTC update to browser
         if self.dash_server:
@@ -264,6 +338,17 @@ class OBDScanner:
         snapshot = self.buffer.format_latest_for_llm()
         output_parts = []
         alert_title = f"{event.pid_name}={event.value}{event.unit} [{event.severity.upper()}]"
+
+        # Index the event itself (separate from the LLM analysis row below).
+        self.db.log_anomaly(
+            pid_name=event.pid_name,
+            value=event.value,
+            unit=event.unit,
+            severity=event.severity,
+            threshold_warn=event.threshold_warn,
+            threshold_critical=event.threshold_critical,
+            consecutive_count=event.consecutive_count,
+        )
 
         # Notify browser dashboard immediately
         if self.dash_server:
@@ -287,6 +372,27 @@ class OBDScanner:
             threshold_warn=event.threshold_warn,
             threshold_critical=event.threshold_critical,
             stream_callback=on_token if config.LLM_STREAM else None,
+        )
+        anomaly_trigger = {
+            "pid_name": event.pid_name,
+            "value": event.value,
+            "unit": event.unit,
+            "severity": event.severity,
+            "threshold_warn": event.threshold_warn,
+            "threshold_critical": event.threshold_critical,
+            "consecutive_count": event.consecutive_count,
+        }
+        self.llm_logger.log(
+            analysis_type="anomaly",
+            trigger=anomaly_trigger,
+            context=snapshot,
+            output=result,
+        )
+        self.db.log_llm_analysis(
+            analysis_type="anomaly",
+            trigger=anomaly_trigger,
+            context=snapshot,
+            output=result,
         )
         if self.dash_server:
             self.dash_server.push_llm_done(result or "")
@@ -314,6 +420,19 @@ class OBDScanner:
             snapshot=snapshot,
             stream_callback=on_token if config.LLM_STREAM else None,
         )
+        dtc_trigger = {"dtc_code": code}
+        self.llm_logger.log(
+            analysis_type="dtc",
+            trigger=dtc_trigger,
+            context=snapshot,
+            output=result,
+        )
+        self.db.log_llm_analysis(
+            analysis_type="dtc",
+            trigger=dtc_trigger,
+            context=snapshot,
+            output=result,
+        )
         if self.dash_server:
             self.dash_server.push_llm_done(result or "")
         if result and not self.show_terminal:
@@ -329,6 +448,17 @@ class OBDScanner:
         alerts (see _on_brake_alert).
         """
         logger.debug(f"Brake event logged: {event.summary()}")
+        self.db.log_brake_event(
+            timestamp=event.timestamp,
+            datetime_str=event.datetime_str,
+            entry_speed_kmh=event.entry_speed_kmh,
+            exit_speed_kmh=event.exit_speed_kmh,
+            duration_s=event.duration_s,
+            peak_decel_g=event.peak_decel_g,
+            avg_decel_g=event.avg_decel_g,
+            estimated_distance_m=event.estimated_distance_m,
+            switch_confirmed=event.switch_confirmed,
+        )
         if self.dash_server:
             stats = self.brake_monitor.dashboard_stats()
             asyncio.get_event_loop().call_soon_threadsafe(
@@ -371,6 +501,27 @@ class OBDScanner:
             trend_text=trend_text,
             stream_callback=on_token if config.LLM_STREAM else None,
         )
+        brake_stats = self.brake_monitor.dashboard_stats()
+        brake_trigger = {
+            "total_events": brake_stats.get("total_events"),
+            "recent_avg_g": brake_stats.get("recent_avg_g"),
+            "medium_avg_g": brake_stats.get("medium_avg_g"),
+            "declining": brake_stats.get("declining"),
+            "decline_pct": brake_stats.get("decline_pct"),
+            "switch_confirmed": brake_stats.get("switch_confirmed"),
+        }
+        self.llm_logger.log(
+            analysis_type="brake",
+            trigger=brake_trigger,
+            context=trend_text,
+            output=result,
+        )
+        self.db.log_llm_analysis(
+            analysis_type="brake",
+            trigger=brake_trigger,
+            context=trend_text,
+            output=result,
+        )
         if self.dash_server:
             self.dash_server.push_llm_done(result or "")
         if result and not self.show_terminal:
@@ -399,6 +550,23 @@ class OBDScanner:
                 stats=stats,
                 stream_callback=on_token if config.LLM_STREAM else None,
             )
+            summary_trigger = {
+                "interval_s": config.LLM_PERIODIC_SUMMARY_INTERVAL,
+                "buffer_samples": len(self.buffer),
+                "stats": stats,
+            }
+            self.llm_logger.log(
+                analysis_type="summary",
+                trigger=summary_trigger,
+                context=telemetry,
+                output=result,
+            )
+            self.db.log_llm_analysis(
+                analysis_type="summary",
+                trigger=summary_trigger,
+                context=telemetry,
+                output=result,
+            )
             if self.dash_server:
                 self.dash_server.push_llm_done(result or "")
             if result and not self.show_terminal:
@@ -411,6 +579,18 @@ class OBDScanner:
         # Setup
         os.makedirs(config.LOG_DIR, exist_ok=True)
         self.csv_logger.open()
+        self.llm_logger.open()
+        self.db.open()
+        vehicle_str = (
+            f"{VEHICLE_INFO['year']} {VEHICLE_INFO['make']} {VEHICLE_INFO['model']} "
+            f"{VEHICLE_INFO['trim']} ({VEHICLE_INFO['engine']})"
+        )
+        self.db.start_session(
+            hardware_profile=getattr(config, "HARDWARE_PROFILE", None),
+            llm_model=config.LLM_MODEL,
+            vehicle=vehicle_str,
+            pids_monitored=list(config.MONITORED_PIDS),
+        )
 
         # Start browser dashboard server
         if self.dash_server:
@@ -476,6 +656,9 @@ class OBDScanner:
             if self.dash_server:
                 await self.dash_server.stop()
             self.csv_logger.close()
+            self.llm_logger.close()
+            self.db.end_session()
+            self.db.close()
             console.print("[green]Goodbye.[/green]")
 
     async def _run_with_dashboard(self):
