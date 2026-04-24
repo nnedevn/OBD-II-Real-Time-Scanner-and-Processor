@@ -266,10 +266,13 @@ class OBDScanner:
         self.reader = OBDReader()
         self.buffer = DataBuffer()
         self.detector = AnomalyDetector()
-        self.llm = LLMInterface()
         self.csv_logger = CSVLogger()
         self.llm_logger = LLMLogger()
+        # DB must exist before LLMInterface so the interface can do cache-from-DB
+        # lookups when Ollama is unavailable. It's safe if the DB isn't open yet —
+        # the LLM only consults it at fallback time, well after run() opens it.
         self.db = Database()
+        self.llm = LLMInterface(db=self.db)
         self.show_terminal = show_terminal
         self.show_web = show_web
         self.web_port = web_port
@@ -754,7 +757,39 @@ def main():
         help='Ask a single question about the vehicle and exit. '
              'Example: --ask "Is my engine running hot?"',
     )
+    parser.add_argument(
+        "--predict",
+        action="store_true",
+        help="Offline predictive-maintenance report from scanner.db history. "
+             "Does not require an OBD or LLM connection; LLM narrative is added "
+             "if available, otherwise the structured report is printed alone.",
+    )
+    parser.add_argument(
+        "--predict-days",
+        type=int,
+        default=14,
+        help="Size of the 'recent' window for --predict (default 14 days).",
+    )
+    parser.add_argument(
+        "--predict-baseline",
+        type=int,
+        default=90,
+        help="Size of the 'baseline' window for --predict (default 90 days).",
+    )
+    parser.add_argument(
+        "--predict-no-llm",
+        action="store_true",
+        help="Skip the LLM narrative pass for --predict; print the structured report only.",
+    )
     args = parser.parse_args()
+
+    if args.predict:
+        _run_predict(
+            recent_days=args.predict_days,
+            baseline_days=args.predict_baseline,
+            use_llm=not args.predict_no_llm,
+        )
+        return
 
     scanner = OBDScanner(
         show_terminal=not args.no_terminal,
@@ -766,6 +801,59 @@ def main():
         asyncio.run(scanner.ask(args.ask))
     else:
         asyncio.run(scanner.run())
+
+
+# ── Predictive maintenance CLI runner ─────────────────────────────────────────
+
+def _run_predict(recent_days: int, baseline_days: int, use_llm: bool) -> None:
+    """
+    Standalone entry: open the event DB read-only, build a predictive
+    maintenance report, print the structured view, optionally run an
+    LLM narrative pass through the resilient-chat pipeline, and exit.
+    Never starts the OBD scanner.
+    """
+    from database import Database
+    from predictive_maintenance import PredictiveMaintenance, format_report_text
+
+    db = Database()
+    db.open()
+    if not db.is_open:
+        console.print(
+            "[red]Could not open scanner.db — nothing to analyse.[/red]"
+        )
+        return
+
+    try:
+        pm = PredictiveMaintenance(
+            db, recent_days=recent_days, baseline_days=baseline_days
+        )
+        report = pm.generate_report()
+
+        console.rule("[bold]Predictive Maintenance Report[/bold]")
+        console.print(format_report_text(report))
+        console.rule()
+
+        if use_llm:
+            try:
+                llm = LLMInterface(db=db)
+            except Exception as e:
+                console.print(f"[yellow]LLM init failed: {e}[/yellow]")
+                llm = None
+            if llm is not None:
+                console.print("[bold]LLM narrative:[/bold]")
+                # Stream straight to the console; resilient_chat will
+                # degrade to a cached/static fallback if Ollama is down.
+                narrative = llm.analyze_predictive_report(
+                    report.to_dict(),
+                    stream_callback=lambda chunk: console.print(chunk, end=""),
+                )
+                if not narrative:
+                    console.print(
+                        "[dim](No narrative generated — LLM returned empty.)[/dim]"
+                    )
+                console.print()  # newline after streamed output
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
